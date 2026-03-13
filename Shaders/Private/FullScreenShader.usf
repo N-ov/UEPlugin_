@@ -1,9 +1,17 @@
-
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Private/SceneTexturesCommon.ush"
 
-
 float Strenght;
+float3 FogColor;
+float FogStart;
+float FogFactor;
+
+float2 PixelSize;
+
+float CalculateWeight(float dist, float sourceDepth, float neighborDepth)
+{
+	return (1.0 - abs(sourceDepth - neighborDepth)) * (1.0 / dist) * neighborDepth;
+}
 
 void MainVS(
 	in float4 InPosition : ATTRIBUTE0,
@@ -19,7 +27,52 @@ float4 MainPS(
 	) : SV_Target0
 {
 	float2 uv = UVAndScreenPos.xy;
-    float4 res = CalcSceneColorAndDepth(uv);
-	
-    return saturate(float4(lerp(res.xyz, res.www*0.00001f, saturate(Strenght)), 1.f));
+
+	float4 base = CalcSceneColorAndDepth(uv);
+	float3 baseColor = base.rgb;
+	float depth = base.w;
+
+	float3 blurColor = baseColor;
+	float weightSum = 1.0;
+
+	[loop]
+	for (int i = 1; i < 5; i++)
+	{
+		float2 offX = float2(i * PixelSize.x, 0);
+		float2 offY = float2(0, i * PixelSize.y);
+
+		float4 s1 = CalcSceneColorAndDepth(uv + offX);
+		float4 s2 = CalcSceneColorAndDepth(uv - offX);
+		float4 s3 = CalcSceneColorAndDepth(uv + offY);
+		float4 s4 = CalcSceneColorAndDepth(uv - offY);
+
+		float w1 = CalculateWeight(i, depth, s1.w);
+		float w2 = CalculateWeight(i, depth, s2.w);
+		float w3 = CalculateWeight(i, depth, s3.w);
+		float w4 = CalculateWeight(i, depth, s4.w);
+
+		blurColor += s1.rgb * w1;
+		blurColor += s2.rgb * w2;
+		blurColor += s3.rgb * w3;
+		blurColor += s4.rgb * w4;
+
+		weightSum += w1 + w2 + w3 + w4;
+	}
+
+	blurColor /= weightSum;
+
+	float3 blended = lerp(baseColor, blurColor, saturate(depth * Strenght));
+
+	float yFactor =
+		uv.y > 0.5 ?
+		1 - ((uv.y - 0.5) * 2.0) :
+		uv.y * 2.0;
+
+	yFactor = saturate(yFactor);
+
+	float fog = saturate((depth - FogStart) * yFactor * FogFactor);
+
+	float3 finalColor = lerp(blended, FogColor, fog);
+
+	return float4(finalColor, 1.0);
 }
