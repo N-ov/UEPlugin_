@@ -1,78 +1,123 @@
 #include "/Engine/Private/Common.ush"
-#include "/Engine/Private/SceneTexturesCommon.ush"
 
-float Strenght;
-float3 FogColor;
+Texture2D InputTexture;
+SamplerState InputSampler;
+
+Texture2D BlurredTexture;
+SamplerState BlurredSampler;
+
+Texture2D SceneDepthTexture;
+SamplerState DepthSampler;
+
+float2 InvBufferSize;
+
+float EffectStrength;
+float BlurStart;
 float FogStart;
 float FogFactor;
+float3 FogColor;
 
-float2 PixelSize;
+int BlurRadius;
+int PassIndex;
 
-float CalculateWeight(float dist, float sourceDepth, float neighborDepth)
+float2 GetUV(float4 SvPosition)
 {
-	return (1.0 - abs(sourceDepth - neighborDepth)) * (1.0 / dist) * neighborDepth;
+    return saturate(SvPosition.xy * InvBufferSize);
 }
 
-void MainVS(
-	in float4 InPosition : ATTRIBUTE0,
-	in float2 InTexCoord : ATTRIBUTE1,
-	out noperspective float4 OutUVAndScreenPos : TEXCOORD0,
-	out float4 OutPosition : SV_POSITION)
+float GetDepth01(float2 UV)
 {
-	DrawRectangle(InPosition, InTexCoord, OutPosition, OutUVAndScreenPos);
+    float DeviceDepth = SceneDepthTexture.SampleLevel(DepthSampler, UV, 0).r;
+
+    // Simple approximation: far ≈ 1, near ≈ 0.
+    return saturate(1.0 - DeviceDepth);
 }
 
-float4 MainPS(
-	noperspective float4 UVAndScreenPos : TEXCOORD0
-	) : SV_Target0
+float CalculateWeight(float DistanceFromSource, float SourceDepth, float NeighborDepth)
 {
-	float2 uv = UVAndScreenPos.xy;
+    float DepthWeight = saturate(1.0 - abs(SourceDepth - NeighborDepth));
+    float DistanceWeight = 1.0 / max(DistanceFromSource, 0.0001);
+    return DepthWeight * DistanceWeight * max(NeighborDepth, 0.001);
+}
 
-	float4 base = CalcSceneColorAndDepth(uv);
-	float3 baseColor = base.rgb;
-	float depth = base.w;
+float4 BlurInputTexture(float2 UV, float2 Axis)
+{
+    float SourceDepth = GetDepth01(UV);
 
-	float3 blurColor = baseColor;
-	float weightSum = 1.0;
+    float4 Color = InputTexture.SampleLevel(InputSampler, UV, 0);
+    float TotalWeight = 1.0;
 
-	[loop]
-	for (int i = 1; i < 5; i++)
-	{
-		float2 offX = float2(i * PixelSize.x, 0);
-		float2 offY = float2(0, i * PixelSize.y);
+    int Radius = clamp(BlurRadius, 1, 16);
 
-		float4 s1 = CalcSceneColorAndDepth(uv + offX);
-		float4 s2 = CalcSceneColorAndDepth(uv - offX);
-		float4 s3 = CalcSceneColorAndDepth(uv + offY);
-		float4 s4 = CalcSceneColorAndDepth(uv - offY);
+    [loop]
+    for (int i = 1; i <= Radius; ++i)
+    {
+        float Offset = (float)i;
 
-		float w1 = CalculateWeight(i, depth, s1.w);
-		float w2 = CalculateWeight(i, depth, s2.w);
-		float w3 = CalculateWeight(i, depth, s3.w);
-		float w4 = CalculateWeight(i, depth, s4.w);
+        float2 UVPos = clamp(UV + Axis * Offset, float2(0.0, 0.0), float2(1.0, 1.0));
+        float DepthPos = GetDepth01(UVPos);
+        float WeightPos = CalculateWeight(Offset, SourceDepth, DepthPos);
 
-		blurColor += s1.rgb * w1;
-		blurColor += s2.rgb * w2;
-		blurColor += s3.rgb * w3;
-		blurColor += s4.rgb * w4;
+        Color += InputTexture.SampleLevel(InputSampler, UVPos, 0) * WeightPos;
+        TotalWeight += WeightPos;
 
-		weightSum += w1 + w2 + w3 + w4;
-	}
+        float2 UVNeg = clamp(UV - Axis * Offset, float2(0.0, 0.0), float2(1.0, 1.0));
+        float DepthNeg = GetDepth01(UVNeg);
+        float WeightNeg = CalculateWeight(Offset, SourceDepth, DepthNeg);
 
-	blurColor /= weightSum;
+        Color += InputTexture.SampleLevel(InputSampler, UVNeg, 0) * WeightNeg;
+        TotalWeight += WeightNeg;
+    }
 
-	float3 blended = lerp(baseColor, blurColor, saturate(depth * Strenght));
+    return Color / max(TotalWeight, 0.0001);
+}
 
-	float yFactor =
-		uv.y > 0.5 ?
-		1 - ((uv.y - 0.5) * 2.0) :
-		uv.y * 2.0;
+float4 BlendDepthHaze(float2 UV)
+{
+    float Depth = GetDepth01(UV);
 
-	yFactor = saturate(yFactor);
+    float4 BaseColor = InputTexture.SampleLevel(InputSampler, UV, 0);
+    float4 BlurredColor = BlurredTexture.SampleLevel(BlurredSampler, UV, 0);
 
-	float fog = saturate((depth - FogStart) * yFactor * FogFactor);
+    float BlurDepthRange = max(1.0 - BlurStart, 0.0001);
+    float BlurAmount = saturate((Depth - BlurStart) / BlurDepthRange) * EffectStrength;
+    float4 BlendedColor = lerp(BaseColor, BlurredColor, BlurAmount);
 
-	float3 finalColor = lerp(blended, FogColor, fog);
+    float YFactor = 0.0;
 
-	return float4(finalColor, 1.0);
+    if (UV.y > 0.5)
+    {
+        YFactor = 1.0 - ((UV.y - 0.5) * 2.0);
+    }
+    else
+    {
+        YFactor = UV.y * 2.0;
+    }
+
+    YFactor = saturate(YFactor);
+
+    float FogAmount = saturate((Depth - FogStart) * YFactor * FogFactor);
+    float3 FinalColor = lerp(BlendedColor.rgb, FogColor, FogAmount);
+
+    return float4(FinalColor, BaseColor.a);
+}
+
+void MainPS(
+    float4 SvPosition : SV_POSITION,
+    out float4 OutColor : SV_Target0)
+{
+    float2 UV = GetUV(SvPosition);
+
+    if (PassIndex == 0)
+    {
+        OutColor = BlurInputTexture(UV, float2(InvBufferSize.x, 0.0));
+    }
+    else if (PassIndex == 1)
+    {
+        OutColor = BlurInputTexture(UV, float2(0.0, InvBufferSize.y));
+    }
+    else
+    {
+        OutColor = BlendDepthHaze(UV);
+    }
 }
