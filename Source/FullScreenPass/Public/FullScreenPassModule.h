@@ -1,15 +1,20 @@
 #pragma once
 
-#include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
+#include "Templates/SharedPointer.h"
 
-#include "FullScreenPassSceneViewExtension.h"
+class FFullScreenPassSceneViewExtension;
 
 class FFullScreenPassModule : public IModuleInterface
 {
 public:
-	virtual void StartupModule() override;
-	virtual void ShutdownModule() override;
+    virtual void StartupModule() override;
+    virtual void ShutdownModule() override;
+
 private:
-	TSharedPtr< class FFullScreenPassSceneViewExtension, ESPMode::ThreadSafe > ViewExtension;
+    void CreateSceneViewExtension();
+
+private:
+    TSharedPtr<FFullScreenPassSceneViewExtension, ESPMode::ThreadSafe> ViewExtension;
+    FDelegateHandle PostEngineInitHandle;
 };
